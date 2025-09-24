@@ -1,4 +1,4 @@
-// main.cpp - Complete GTA-style game with car damage system (SFML 3.0 compatible)
+// main.cpp - Complete GTA-style game with improved systems (SFML 3.0 compatible)
 #include <SFML/Graphics.hpp>
 #include <iostream>
 #include <random>
@@ -11,14 +11,18 @@
 #include <cmath>
 #include <memory>
 #include <string>
+#include <deque>
 
-// Game constants
+// Game constants - BALANCED
 const int MAP_SIZE = 100;
 const int TILE_SIZE = 64;
 const int BLOCK_SIZE = 8;
-const float BASE_CAR_SPEED = 120.0f;
-const float VIEW_DISTANCE = 1200.0f;
-const int MAX_CARS = 80;
+const float BASE_CAR_SPEED = 80.0f; // Ridotto da 120.0f
+const float VIEW_DISTANCE = 1000.0f; // Ridotto per performance
+const int MAX_CARS = 60; // Ridotto da 80
+const int MAX_PEDESTRIANS = 80; // Aumentato per più vita in città
+const float LANE_WIDTH = 48.0f;
+const float SIDEWALK_WIDTH = 16.0f;
 
 // Global textures for different vehicle types
 static sf::Texture streetTexture;
@@ -36,12 +40,31 @@ static sf::Texture sportsCarTexture;
 static sf::Texture truckTexture;
 static sf::Texture compactTexture;
 static sf::Texture busTexture;
+
+// Pedestrian textures
+static sf::Texture pedestrianCitizenTexture;
+static sf::Texture pedestrianBusinessmanTexture;
+static sf::Texture pedestrianElderlyTexture;
+static sf::Texture pedestrianChildTexture;
+static sf::Texture pedestrianJoggerTexture;
+static sf::Texture pedestrianWomanTexture;
+static sf::Texture pedestrianPoliceTexture;
+
 static bool hasSedanTexture = false;
 static bool hasSuvTexture = false;
 static bool hasSportsCarTexture = false;
 static bool hasTruckTexture = false;
 static bool hasCompactTexture = false;
 static bool hasBusTexture = false;
+
+// Pedestrian texture flags
+static bool hasPedestrianCitizen = false;
+static bool hasPedestrianBusinessman = false;
+static bool hasPedestrianElderly = false;
+static bool hasPedestrianChild = false;
+static bool hasPedestrianJogger = false;
+static bool hasPedestrianWoman = false;
+static bool hasPedestrianPolice = false;
 
 // Texture loading flags
 static bool hasStreetTexture = false;
@@ -65,6 +88,31 @@ enum VehicleType
     BUS = 5
 };
 
+// Pedestrian enums
+enum PedestrianState {
+    WALKING = 0,
+    WAITING = 1,
+    RUNNING = 2,  // Quando spaventato dalle auto
+    CROSSING = 3, // Attraversamento strada
+    IDLE = 4      // Fermo in un punto
+};
+
+enum PedestrianType {
+    CITIZEN = 0,
+    BUSINESSMAN = 1,
+    ELDERLY = 2,
+    CHILD = 3,
+    JOGGER = 4,
+    WOMAN = 5,
+    POLICE = 6
+};
+
+enum TextureResolution {
+    LOW_RES = 32,    // 32px per dispositivi mobili
+    MED_RES = 64,    // 64px standard
+    HIGH_RES = 128   // 128px per HD
+};
+
 // Map cell types
 enum MapType
 {
@@ -86,6 +134,45 @@ enum Direction
     NONE = -1
 };
 
+// Vehicle dimensions structure
+struct VehicleDimensions {
+    sf::Vector2f baseSize;      // Dimensione base in pixels
+    sf::Vector2f collisionBox; // Hitbox per collisioni (più piccola)
+    sf::Vector2f textureSize;   // Dimensione texture originale
+    float textureScale;         // Scala per adattare texture
+    
+    VehicleDimensions() = default;
+    VehicleDimensions(sf::Vector2f base, sf::Vector2f collision, sf::Vector2f texture) 
+        : baseSize(base), collisionBox(collision), textureSize(texture) {
+        // Calcola scala automaticamente
+        textureScale = std::min(base.x / texture.x, base.y / texture.y);
+    }
+};
+
+// Pedestrian structures
+struct PedestrianWaypoint {
+    sf::Vector2f position;
+    float waitTime;
+    bool isIntersection;
+    bool isCrossingPoint;
+    
+    PedestrianWaypoint(sf::Vector2f pos, float wait = 0.f, bool intersection = false, bool crossing = false)
+        : position(pos), waitTime(wait), isIntersection(intersection), isCrossingPoint(crossing) {}
+};
+
+struct PedestrianProperties {
+    PedestrianType type;
+    float speed;
+    float panicThreshold; // Distanza dalle auto per iniziare a correre
+    sf::Color color;
+    sf::Vector2f size;
+    float waitTimeMultiplier;
+    sf::Texture* texture;
+    
+    PedestrianProperties(PedestrianType t, float s, float panic, sf::Color c, sf::Vector2f sz, float waitMult, sf::Texture* tex)
+        : type(t), speed(s), panicThreshold(panic), color(c), size(sz), waitTimeMultiplier(waitMult), texture(tex) {}
+};
+
 // Vehicle properties structure
 struct VehicleProperties
 {
@@ -101,72 +188,209 @@ struct VehicleProperties
         : type(t), size(s), texture(tex), speedMultiplier(speed), aggressiveness(aggr), turnRate(turn) {}
 };
 
-// Vehicle properties database
-class VehicleDatabase
-{
+// Forward declarations
+struct MapGenerator;
+struct Car;
+
+// Pedestrian Database
+class PedestrianDatabase {
 public:
-    static VehicleProperties getRandomVehicleProperties(std::mt19937 &rng)
-    {
-        std::uniform_int_distribution<int> typeDist(0, 5);
-        VehicleType type = static_cast<VehicleType>(typeDist(rng));
-
-        switch (type)
-        {
-        case SEDAN:
-            return VehicleProperties(
-                SEDAN,
-                sf::Vector2f(45.f, 25.f),
-                (hasSedanTexture ? &sedanTexture : nullptr),
-                1.0f, 0.3f, 0.8f);
-
-        case SUV:
-            return VehicleProperties(
-                SUV,
-                sf::Vector2f(50.f, 30.f),
-                (hasSuvTexture ? &suvTexture : nullptr),
-                0.85f, 0.2f, 0.6f);
-
-        case SPORTS_CAR:
-            return VehicleProperties(
-                SPORTS_CAR,
-                sf::Vector2f(42.f, 22.f),
-                (hasSportsCarTexture ? &sportsCarTexture : nullptr),
-                1.4f, 0.8f, 1.2f);
-
-        case TRUCK:
-            return VehicleProperties(
-                TRUCK,
-                sf::Vector2f(60.f, 35.f),
-                (hasTruckTexture ? &truckTexture : nullptr),
-                0.7f, 0.1f, 0.4f);
-
-        case COMPACT:
-            return VehicleProperties(
-                COMPACT,
-                sf::Vector2f(38.f, 22.f),
-                (hasCompactTexture ? &compactTexture : nullptr),
-                1.1f, 0.4f, 1.0f);
-
-        case BUS:
-            return VehicleProperties(
-                BUS,
-                sf::Vector2f(70.f, 30.f),
-                (hasBusTexture ? &busTexture : nullptr),
-                0.6f, 0.0f, 0.3f);
-
-        default:
-            return VehicleProperties(
-                SEDAN,
-                sf::Vector2f(45.f, 25.f),
-                (hasSedanTexture ? &sedanTexture : nullptr),
-                1.0f, 0.3f, 0.8f);
+    static PedestrianProperties getRandomPedestrianProperties(std::mt19937 &rng) {
+        std::uniform_int_distribution<int> typeDist(0, 6);
+        PedestrianType type = static_cast<PedestrianType>(typeDist(rng));
+        
+        switch (type) {
+            case CITIZEN:
+                return PedestrianProperties(
+                    CITIZEN, 45.f, 80.f, 
+                    sf::Color(100, 150, 200), sf::Vector2f(16.f, 16.f), 1.0f,
+                    hasPedestrianCitizen ? &pedestrianCitizenTexture : nullptr
+                );
+                
+            case BUSINESSMAN:
+                return PedestrianProperties(
+                    BUSINESSMAN, 55.f, 70.f,
+                    sf::Color(50, 50, 50), sf::Vector2f(16.f, 16.f), 0.7f,
+                    hasPedestrianBusinessman ? &pedestrianBusinessmanTexture : nullptr
+                );
+                
+            case ELDERLY:
+                return PedestrianProperties(
+                    ELDERLY, 25.f, 100.f,
+                    sf::Color(150, 150, 150), sf::Vector2f(14.f, 14.f), 2.0f,
+                    hasPedestrianElderly ? &pedestrianElderlyTexture : nullptr
+                );
+                
+            case CHILD:
+                return PedestrianProperties(
+                    CHILD, 35.f, 60.f,
+                    sf::Color(255, 200, 100), sf::Vector2f(12.f, 12.f), 1.5f,
+                    hasPedestrianChild ? &pedestrianChildTexture : nullptr
+                );
+                
+            case JOGGER:
+                return PedestrianProperties(
+                    JOGGER, 90.f, 50.f,
+                    sf::Color(255, 100, 100), sf::Vector2f(16.f, 16.f), 0.2f,
+                    hasPedestrianJogger ? &pedestrianJoggerTexture : nullptr
+                );
+                
+            case WOMAN:
+                return PedestrianProperties(
+                    WOMAN, 50.f, 75.f,
+                    sf::Color(200, 150, 200), sf::Vector2f(16.f, 16.f), 1.1f,
+                    hasPedestrianWoman ? &pedestrianWomanTexture : nullptr
+                );
+                
+            case POLICE:
+                return PedestrianProperties(
+                    POLICE, 60.f, 30.f, // Police don't panic easily
+                    sf::Color(0, 0, 200), sf::Vector2f(16.f, 16.f), 0.5f,
+                    hasPedestrianPolice ? &pedestrianPoliceTexture : nullptr
+                );
+                
+            default:
+                return PedestrianProperties(
+                    CITIZEN, 45.f, 80.f,
+                    sf::Color(100, 150, 200), sf::Vector2f(16.f, 16.f), 1.0f,
+                    hasPedestrianCitizen ? &pedestrianCitizenTexture : nullptr
+                );
         }
     }
 };
 
-// Forward declarations
-struct MapGenerator;
-struct Car;
+// Vehicle properties database
+class VehicleDatabase {
+private:
+    static std::unordered_map<VehicleType, VehicleDimensions> dimensions;
+    
+public:
+    static void initializeDimensions() {
+        // Dimensioni basate su proporzioni reali di veicoli
+        // Sedan: veicolo medio-piccolo
+        dimensions[SEDAN] = VehicleDimensions(
+            sf::Vector2f(40.f, 20.f),     // Base size (fits in lane)
+            sf::Vector2f(36.f, 18.f),     // Collision box (90% of base)
+            sf::Vector2f(64.f, 32.f)      // Expected texture size
+        );
+        
+        // SUV: più largo e lungo
+        dimensions[SUV] = VehicleDimensions(
+            sf::Vector2f(44.f, 24.f),
+            sf::Vector2f(40.f, 22.f),
+            sf::Vector2f(64.f, 32.f)
+        );
+        
+        // Sports Car: basso e stretto
+        dimensions[SPORTS_CAR] = VehicleDimensions(
+            sf::Vector2f(38.f, 18.f),
+            sf::Vector2f(34.f, 16.f),
+            sf::Vector2f(64.f, 32.f)
+        );
+        
+        // Truck: molto grande
+        dimensions[TRUCK] = VehicleDimensions(
+            sf::Vector2f(48.f, 28.f),
+            sf::Vector2f(44.f, 26.f),
+            sf::Vector2f(96.f, 48.f)      // Texture più grande
+        );
+        
+        // Compact: piccolo
+        dimensions[COMPACT] = VehicleDimensions(
+            sf::Vector2f(32.f, 18.f),
+            sf::Vector2f(28.f, 16.f),
+            sf::Vector2f(48.f, 32.f)
+        );
+        
+        // Bus: molto lungo
+        dimensions[BUS] = VehicleDimensions(
+            sf::Vector2f(56.f, 24.f),
+            sf::Vector2f(52.f, 22.f),
+            sf::Vector2f(128.f, 48.f)     // Texture molto grande
+        );
+    }
+    
+    static VehicleDimensions getDimensions(VehicleType type) {
+        auto it = dimensions.find(type);
+        if (it != dimensions.end()) {
+            return it->second;
+        }
+        return dimensions[SEDAN]; // Default fallback
+    }
+    
+    static VehicleProperties getRandomVehicleProperties(std::mt19937 &rng) {
+        std::uniform_int_distribution<int> typeDist(0, 5);
+        VehicleType type = static_cast<VehicleType>(typeDist(rng));
+        
+        VehicleDimensions dims = getDimensions(type);
+        
+        // Proprietà aggiornate con dimensioni ottimizzate
+        switch (type) {
+            case SEDAN:
+                return VehicleProperties(
+                    SEDAN, dims.baseSize, 
+                    (hasSedanTexture ? &sedanTexture : nullptr),
+                    1.0f, 0.3f, 0.8f
+                );
+                
+            case SUV:
+                return VehicleProperties(
+                    SUV, dims.baseSize,
+                    (hasSuvTexture ? &suvTexture : nullptr),
+                    0.85f, 0.2f, 0.6f
+                );
+                
+            case SPORTS_CAR:
+                return VehicleProperties(
+                    SPORTS_CAR, dims.baseSize,
+                    (hasSportsCarTexture ? &sportsCarTexture : nullptr),
+                    1.4f, 0.8f, 1.2f
+                );
+                
+            case TRUCK:
+                return VehicleProperties(
+                    TRUCK, dims.baseSize,
+                    (hasTruckTexture ? &truckTexture : nullptr),
+                    0.7f, 0.1f, 0.4f
+                );
+                
+            case COMPACT:
+                return VehicleProperties(
+                    COMPACT, dims.baseSize,
+                    (hasCompactTexture ? &compactTexture : nullptr),
+                    1.1f, 0.4f, 1.0f
+                );
+                
+            case BUS:
+                return VehicleProperties(
+                    BUS, dims.baseSize,
+                    (hasBusTexture ? &busTexture : nullptr),
+                    0.6f, 0.0f, 0.3f
+                );
+                
+            default:
+                return VehicleProperties(
+                    SEDAN, dims.baseSize,
+                    (hasSedanTexture ? &sedanTexture : nullptr),
+                    1.0f, 0.3f, 0.8f
+                );
+        }
+    }
+};
+
+// Initialize static member
+std::unordered_map<VehicleType, VehicleDimensions> VehicleDatabase::dimensions;
+
+// Utility functions
+sf::Vector2f getOptimalTextureScale(const sf::Texture* texture, sf::Vector2f targetSize) {
+    if (!texture) return sf::Vector2f(1.f, 1.f);
+    
+    sf::Vector2u textureSize = texture->getSize();
+    return sf::Vector2f(
+        targetSize.x / static_cast<float>(textureSize.x),
+        targetSize.y / static_cast<float>(textureSize.y)
+    );
+}
 
 // Road point structure for navigation
 struct RoadPoint
@@ -522,6 +746,61 @@ void RoadNetwork::drawNetwork(sf::RenderWindow &window)
     }
 }
 
+// Pedestrian class - DECLARATION ONLY
+class Pedestrian {
+private:
+    sf::RectangleShape shape; // Cambiato da CircleShape a RectangleShape per texture
+    sf::Vector2f position;
+    sf::Vector2f velocity;
+    PedestrianProperties properties;
+    PedestrianState currentState;
+    
+    // AI e pathfinding migliorato
+    std::deque<PedestrianWaypoint> waypointQueue;
+    PedestrianWaypoint* currentTarget;
+    float stateTimer;
+    float avoidanceRadius;
+    
+    // Comportamenti
+    bool isScared;
+    sf::Vector2f fleeDirection;
+    float fearTimer;
+    
+    // Movimento sui marciapiedi
+    sf::Vector2f lastSafeSidewalkPosition;
+    bool isOnSidewalk;
+    
+    std::mt19937* rng;
+    
+public:
+    float distanceToPlayer;
+    bool isActive;
+    
+    Pedestrian(sf::Vector2f startPos, std::mt19937* randomGen);
+    
+    void generateRandomPath();
+    sf::Vector2f generateSidewalkPosition();
+    sf::Vector2f generateCrossingPoint();
+    void setNextTarget();
+    void update(float deltaTime, sf::Vector2f playerPos, const std::vector<std::unique_ptr<Car>>& cars, MapGenerator& gen);
+    void checkCarAvoidance(const std::vector<std::unique_ptr<Car>>& cars);
+    void updateWalking(float deltaTime, MapGenerator& gen);
+    void updateWaiting(float deltaTime);
+    void updateRunning(float deltaTime, MapGenerator& gen);
+    void updateCrossing(float deltaTime, const std::vector<std::unique_ptr<Car>>& cars);
+    void updateIdle(float deltaTime);
+    void draw(sf::RenderWindow& window);
+    
+    // Utility functions for sidewalk movement
+    bool isPositionOnSidewalk(sf::Vector2f pos, MapGenerator& gen);
+    sf::Vector2f getNearestSidewalkPosition(sf::Vector2f pos, MapGenerator& gen);
+    sf::Vector2f generateRandomSidewalkWaypoint();
+    
+    sf::Vector2f getPosition() const { return position; }
+    PedestrianType getType() const { return properties.type; }
+    PedestrianState getState() const { return currentState; }
+};
+
 // Car structure with vehicle variety and damage system
 struct Car
 {
@@ -551,6 +830,12 @@ struct Car
     float fireTimer = 0.f;
     float explosionTimer = -1.f; // -1 = not exploded, >=0 = exploding
 
+    // Sistema collisioni migliorato
+    float lastCollisionTime = 0.f;
+    float collisionCooldown = 1.0f; // Cooldown di 1 secondo tra collisioni
+    sf::Vector2f collisionVelocity = sf::Vector2f(0.f, 0.f);
+    sf::Vector2f collisionBox; // Dimensioni collision box (più piccola del visual)
+
     // Custom behavior
     float aggressionTimer;
     float honkTimer;
@@ -564,6 +849,74 @@ struct Car
     std::mt19937 *rng;
     RoadNetwork *roadNetwork;
     MapGenerator *mapGen;
+
+    // Sistema danni migliorato
+    void updateCollisionDamage(float deltaTime, float currentSpeed, bool hasCollision, sf::Vector2f moveVector) {
+        lastCollisionTime += deltaTime;
+        
+        if (hasCollision && lastCollisionTime >= collisionCooldown) {
+            // Soglia minima per danni: 200 pixels/sec invece di 100
+            float minDamageSpeed = 200.0f;
+            
+            if (currentSpeed > minDamageSpeed) {
+                // Sistema di danni graduali basato sulla velocità
+                float excessSpeed = currentSpeed - minDamageSpeed;
+                float baseDamage = excessSpeed * 0.15f; // Ridotto da 0.3f
+                
+                // Moltiplicatore basato sul tipo di veicolo
+                float vehicleMultiplier = 1.0f;
+                switch (properties.type) {
+                    case TRUCK:
+                    case BUS:
+                        vehicleMultiplier = 0.6f; // Veicoli pesanti sono più resistenti
+                        break;
+                    case SPORTS_CAR:
+                        vehicleMultiplier = 1.4f; // Auto sportive più fragili
+                        break;
+                    case COMPACT:
+                        vehicleMultiplier = 1.2f;
+                        break;
+                    default:
+                        vehicleMultiplier = 1.0f;
+                }
+                
+                float finalDamage = baseDamage * vehicleMultiplier;
+                
+                // Limita danni massimi per impatto singolo
+                finalDamage = std::min(finalDamage, 100.0f);
+                
+                takeDamage(finalDamage);
+                lastCollisionTime = 0.f; // Reset cooldown
+                
+                std::cout << "COLLISION! Speed: " << (int)currentSpeed 
+                          << " | Damage: " << (int)finalDamage 
+                          << " | Vehicle: " << getVehicleTypeName() << std::endl;
+            }
+        }
+    }
+
+    // Funzione collision check migliorata
+    bool checkBuildingCollision(float newX, float newY, MapGenerator &gen) {
+        sf::Vector2f halfBox = collisionBox / 2.0f;
+        
+        std::vector<sf::Vector2f> checkPoints = {
+            {newX - halfBox.x, newY - halfBox.y},
+            {newX + halfBox.x, newY - halfBox.y},
+            {newX - halfBox.x, newY + halfBox.y},
+            {newX + halfBox.x, newY + halfBox.y}
+        };
+        
+        for (const auto& point : checkPoints) {
+            int gridX = static_cast<int>(point.x / TILE_SIZE);
+            int gridY = static_cast<int>(point.y / TILE_SIZE);
+            
+            if (gen.getCell(gridX, gridY) == BUILDING) {
+                return true;
+            }
+        }
+        
+        return false;
+    }
 
     // Damage system methods
     void takeDamage(float damage) {
@@ -605,6 +958,7 @@ struct Car
         }
     }
 
+    // Costruttore migliorato
     Car(float startX, float startY, Direction startDir, std::mt19937 *randomGen,
         RoadNetwork *network, MapGenerator *gen)
         : x(startX), y(startY), currentDirection(startDir),
@@ -624,6 +978,9 @@ struct Car
         carShape.setOrigin(sf::Vector2f(properties.size.x / 2.0f, properties.size.y / 2.0f));
         carShape.setPosition(sf::Vector2f(x, y));
         carShape.setTexture(properties.texture); // Use texture if available
+
+        // Imposta collision box (90% delle dimensioni visive)
+        collisionBox = sf::Vector2f(properties.size.x * 0.9f, properties.size.y * 0.9f);
 
         // Set rotation based on direction
         updateRotation();
@@ -1104,6 +1461,524 @@ struct Car
     }
 };
 
+// NOW DEFINE PEDESTRIAN METHODS AFTER CAR IS FULLY DEFINED
+Pedestrian::Pedestrian(sf::Vector2f startPos, std::mt19937* randomGen) 
+    : position(startPos), properties(PedestrianDatabase::getRandomPedestrianProperties(*randomGen)),
+      currentState(WALKING), currentTarget(nullptr), stateTimer(0.f),
+      avoidanceRadius(50.f), isScared(false), fearTimer(0.f), rng(randomGen),
+      distanceToPlayer(0.f), isActive(true), isOnSidewalk(true) {
+    
+    // Configura shape come sprite rettangolare per texture
+    shape.setSize(properties.size);
+    shape.setFillColor(properties.color);
+    shape.setOrigin(sf::Vector2f(properties.size.x / 2.f, properties.size.y / 2.f));
+    shape.setPosition(position);
+    
+    // Imposta texture se disponibile
+    if (properties.texture) {
+        shape.setTexture(properties.texture);
+    }
+    
+    velocity = sf::Vector2f(0.f, 0.f);
+    lastSafeSidewalkPosition = startPos;
+    
+    // Genera path iniziale
+    generateRandomPath();
+}
+
+bool Pedestrian::isPositionOnSidewalk(sf::Vector2f pos, MapGenerator& gen) {
+    int gridX = static_cast<int>(pos.x / TILE_SIZE);
+    int gridY = static_cast<int>(pos.y / TILE_SIZE);
+    
+    int cellType = gen.getCell(gridX, gridY);
+    return (cellType == SIDEWALK || cellType == PARK);
+}
+
+sf::Vector2f Pedestrian::getNearestSidewalkPosition(sf::Vector2f pos, MapGenerator& gen) {
+    int centerX = static_cast<int>(pos.x / TILE_SIZE);
+    int centerY = static_cast<int>(pos.y / TILE_SIZE);
+    
+    // Cerca in un raggio crescente
+    for (int radius = 1; radius <= 3; radius++) {
+        for (int dx = -radius; dx <= radius; dx++) {
+            for (int dy = -radius; dy <= radius; dy++) {
+                int checkX = centerX + dx;
+                int checkY = centerY + dy;
+                
+                if (gen.getCell(checkX, checkY) == SIDEWALK) {
+                    return sf::Vector2f(
+                        checkX * TILE_SIZE + TILE_SIZE / 2.f,
+                        checkY * TILE_SIZE + TILE_SIZE / 2.f
+                    );
+                }
+            }
+        }
+    }
+    
+    return pos; // Fallback
+}
+
+sf::Vector2f Pedestrian::generateRandomSidewalkWaypoint() {
+    // Genera waypoint casuali che siano garantiti sui marciapiedi
+    int attempts = 0;
+    sf::Vector2f waypoint;
+    
+    do {
+        int blockX = (*rng)() % (MAP_SIZE / BLOCK_SIZE);
+        int blockY = (*rng)() % (MAP_SIZE / BLOCK_SIZE);
+        
+        // Posizioni specifiche dei marciapiedi nel sistema a griglia
+        int localX, localY;
+        
+        // Scegli un lato del blocco per il marciapiede
+        int side = (*rng)() % 4;
+        switch (side) {
+            case 0: // Lato nord
+                localX = 1 + (*rng)() % (BLOCK_SIZE - 2);
+                localY = 2; // Marciapiede nord
+                break;
+            case 1: // Lato sud
+                localX = 1 + (*rng)() % (BLOCK_SIZE - 2);
+                localY = 4; // Marciapiede sud
+                break;
+            case 2: // Lato ovest
+                localX = 2; // Marciapiede ovest
+                localY = 1 + (*rng)() % (BLOCK_SIZE - 2);
+                break;
+            case 3: // Lato est
+                localX = 4; // Marciapiede est
+                localY = 1 + (*rng)() % (BLOCK_SIZE - 2);
+                break;
+        }
+        
+        // Evita la strada centrale
+        if (localX == 3) localX = ((*rng)() % 2 == 0) ? 2 : 4;
+        if (localY == 3) localY = ((*rng)() % 2 == 0) ? 2 : 4;
+        
+        waypoint.x = (blockX * BLOCK_SIZE + localX) * TILE_SIZE + TILE_SIZE / 2.f;
+        waypoint.y = (blockY * BLOCK_SIZE + localY) * TILE_SIZE + TILE_SIZE / 2.f;
+        
+        attempts++;
+    } while (attempts < 20);
+    
+    return waypoint;
+}
+
+void Pedestrian::generateRandomPath() {
+    waypointQueue.clear();
+    
+    // Genera più waypoint per percorsi più lunghi
+    int numWaypoints = 4 + (*rng)() % 4; // 4-7 waypoint
+    
+    for (int i = 0; i < numWaypoints; i++) {
+        sf::Vector2f waypoint = generateRandomSidewalkWaypoint();
+        float waitTime = (0.3f + static_cast<float>((*rng)() % 15) / 10.f) * properties.waitTimeMultiplier;
+        
+        waypointQueue.push_back(PedestrianWaypoint(waypoint, waitTime));
+    }
+    
+    // Occasionalmente aggiungi attraversamento
+    if ((*rng)() % 3 == 0) { // 33% probabilità
+        sf::Vector2f crossingPoint = generateCrossingPoint();
+        waypointQueue.push_back(PedestrianWaypoint(crossingPoint, 2.0f, true, true));
+    }
+    
+    setNextTarget();
+}
+
+sf::Vector2f Pedestrian::generateSidewalkPosition() {
+    return generateRandomSidewalkWaypoint(); // Usa la nuova funzione migliorata
+}
+
+sf::Vector2f Pedestrian::generateCrossingPoint() {
+    // Genera punto di attraversamento alle intersezioni
+    int blockX = (*rng)() % (MAP_SIZE / BLOCK_SIZE - 1);
+    int blockY = (*rng)() % (MAP_SIZE / BLOCK_SIZE - 1);
+    
+    float worldX = (blockX * BLOCK_SIZE + 3) * TILE_SIZE + TILE_SIZE / 2.f;
+    float worldY = (blockY * BLOCK_SIZE + 3) * TILE_SIZE + TILE_SIZE / 2.f;
+    
+    return sf::Vector2f(worldX, worldY);
+}
+
+void Pedestrian::setNextTarget() {
+    if (!waypointQueue.empty()) {
+        currentTarget = &waypointQueue.front();
+    } else {
+        currentTarget = nullptr;
+        // Rigenera path quando finisce
+        generateRandomPath();
+    }
+}
+
+void Pedestrian::update(float deltaTime, sf::Vector2f playerPos, const std::vector<std::unique_ptr<Car>>& cars, MapGenerator& gen) {
+    // Calcola distanza dal player
+    distanceToPlayer = std::sqrt(std::pow(position.x - playerPos.x, 2) + 
+                                std::pow(position.y - playerPos.y, 2));
+    
+    // Deattiva se troppo lontano
+    if (distanceToPlayer > VIEW_DISTANCE * 1.5f) {
+        isActive = false;
+        return;
+    }
+    isActive = true;
+    
+    // Update timers
+    stateTimer += deltaTime;
+    if (fearTimer > 0.f) fearTimer -= deltaTime;
+    
+    // Controlla se è ancora sui marciapiedi
+    isOnSidewalk = isPositionOnSidewalk(position, gen);
+    if (isOnSidewalk) {
+        lastSafeSidewalkPosition = position;
+    }
+    
+    // Controllo paura dalle auto
+    checkCarAvoidance(cars);
+    
+    // State machine
+    switch (currentState) {
+        case WALKING:
+            updateWalking(deltaTime, gen);
+            break;
+        case WAITING:
+            updateWaiting(deltaTime);
+            break;
+        case RUNNING:
+            updateRunning(deltaTime, gen);
+            break;
+        case CROSSING:
+            updateCrossing(deltaTime, cars);
+            break;
+        case IDLE:
+            updateIdle(deltaTime);
+            break;
+    }
+    
+    // Applica movimento con controllo marciapiedi
+    sf::Vector2f newPosition = position + velocity * deltaTime;
+    
+    // Se il movimento lo porta fuori dai marciapiedi (e non è in attraversamento)
+    if (currentState != CROSSING && !isPositionOnSidewalk(newPosition, gen)) {
+        // Trova la posizione più vicina sui marciapiedi
+        newPosition = getNearestSidewalkPosition(newPosition, gen);
+        // Riduce la velocità per evitare oscillazioni
+        velocity *= 0.3f;
+    }
+    
+    position = newPosition;
+    shape.setPosition(position);
+    
+    // Evita uscire dai confini
+    position.x = std::clamp(position.x, 20.f, MAP_SIZE * TILE_SIZE - 20.f);
+    position.y = std::clamp(position.y, 20.f, MAP_SIZE * TILE_SIZE - 20.f);
+}
+
+void Pedestrian::checkCarAvoidance(const std::vector<std::unique_ptr<Car>>& cars) {
+    isScared = false;
+    
+    for (const auto& car : cars) {
+        if (!car->isActive || car->isDestroyed) continue;
+        
+        float distToCar = std::sqrt(std::pow(position.x - car->x, 2) + 
+                                   std::pow(position.y - car->y, 2));
+        
+        if (distToCar < properties.panicThreshold) {
+            isScared = true;
+            fearTimer = 2.0f;
+            
+            // Calcola direzione di fuga
+            sf::Vector2f toMe = position - sf::Vector2f(car->x, car->y);
+            float length = std::sqrt(toMe.x * toMe.x + toMe.y * toMe.y);
+            if (length > 0) {
+                fleeDirection = toMe / length;
+            }
+            
+            // Cambia stato se non già in fuga
+            if (currentState == WALKING || currentState == WAITING) {
+                currentState = RUNNING;
+                stateTimer = 0.f;
+            }
+            break;
+        }
+    }
+}
+
+void Pedestrian::updateWalking(float deltaTime, MapGenerator& gen) {
+    if (!currentTarget) {
+        currentState = IDLE;
+        stateTimer = 0.f;
+        return;
+    }
+    
+    // Movimento verso target
+    sf::Vector2f toTarget = currentTarget->position - position;
+    float distance = std::sqrt(toTarget.x * toTarget.x + toTarget.y * toTarget.y);
+    
+    if (distance < 15.f) { // Aumentato da 10.f per evitare jittering
+        // Raggiunto waypoint
+        if (currentTarget->waitTime > 0.f) {
+            currentState = WAITING;
+            stateTimer = 0.f;
+            velocity = sf::Vector2f(0.f, 0.f);
+        } else {
+            // Vai al prossimo waypoint
+            waypointQueue.pop_front();
+            setNextTarget();
+        }
+    } else {
+        // Muovi verso target
+        sf::Vector2f direction = toTarget / distance;
+        velocity = direction * properties.speed;
+        
+        // Se non è in attraversamento, assicurati che il target sia su marciapiede
+        if (!currentTarget->isCrossingPoint && !isPositionOnSidewalk(currentTarget->position, gen)) {
+            // Trova un nuovo target sui marciapiedi
+            waypointQueue.pop_front();
+            sf::Vector2f newTarget = generateRandomSidewalkWaypoint();
+            waypointQueue.push_front(PedestrianWaypoint(newTarget, 0.5f));
+            setNextTarget();
+        }
+    }
+}
+
+void Pedestrian::updateWaiting(float deltaTime) {
+    velocity = sf::Vector2f(0.f, 0.f);
+    
+    if (stateTimer >= currentTarget->waitTime) {
+        waypointQueue.pop_front();
+        setNextTarget();
+        currentState = WALKING;
+        stateTimer = 0.f;
+    }
+}
+
+void Pedestrian::updateRunning(float deltaTime, MapGenerator& gen) {
+    if (fearTimer <= 0.f && !isScared) {
+        // Smetti di correre, torna sui marciapiedi se necessario
+        if (!isOnSidewalk) {
+            position = lastSafeSidewalkPosition;
+        }
+        currentState = WALKING;
+        stateTimer = 0.f;
+        return;
+    }
+    
+    // Corri nella direzione opposta alle auto, ma cerca di rimanere sui marciapiedi
+    sf::Vector2f fleeVelocity = fleeDirection * (properties.speed * 2.0f);
+    sf::Vector2f testPosition = position + fleeVelocity * deltaTime;
+    
+    // Se la fuga lo porta fuori dai marciapiedi, cerca una direzione alternativa
+    if (!isPositionOnSidewalk(testPosition, gen)) {
+        // Cerca direzioni alternative sui marciapiedi
+        for (int i = 0; i < 8; i++) {
+            float angle = i * 45.0f * M_PI / 180.0f;
+            sf::Vector2f altDirection(std::cos(angle), std::sin(angle));
+            sf::Vector2f altVelocity = altDirection * (properties.speed * 1.5f);
+            sf::Vector2f altTestPos = position + altVelocity * deltaTime;
+            
+            if (isPositionOnSidewalk(altTestPos, gen)) {
+                velocity = altVelocity;
+                return;
+            }
+        }
+        // Se nessuna direzione funziona, rimani fermo
+        velocity = sf::Vector2f(0.f, 0.f);
+    } else {
+        velocity = fleeVelocity;
+    }
+}
+
+void Pedestrian::updateCrossing(float deltaTime, const std::vector<std::unique_ptr<Car>>& cars) {
+    // Attraversamento strada - controlla traffico
+    bool trafficClear = true;
+    
+    for (const auto& car : cars) {
+        if (!car->isActive || car->isDestroyed) continue;
+        
+        float distToCar = std::sqrt(std::pow(position.x - car->x, 2) + 
+                                   std::pow(position.y - car->y, 2));
+        
+        if (distToCar < 120.f) { // Area di controllo traffico aumentata
+            trafficClear = false;
+            break;
+        }
+    }
+    
+    if (trafficClear || stateTimer > 8.0f) { // Max 8 secondi di attesa
+        // Procedi con attraversamento
+        currentState = WALKING;
+        stateTimer = 0.f;
+    } else {
+        // Aspetta che il traffico si liberi
+        velocity = sf::Vector2f(0.f, 0.f);
+    }
+}
+
+void Pedestrian::updateIdle(float deltaTime) {
+    velocity = sf::Vector2f(0.f, 0.f);
+    
+    if (stateTimer > 2.0f) { // Idle per 2 secondi
+        generateRandomPath();
+        currentState = WALKING;
+        stateTimer = 0.f;
+    }
+}
+
+void Pedestrian::draw(sf::RenderWindow& window) {
+    if (!isActive) return;
+    
+    // Cambia colore se spaventato
+    if (isScared || fearTimer > 0.f) {
+        shape.setFillColor(sf::Color::Red);
+    } else {
+        shape.setFillColor(properties.color);
+    }
+    
+    window.draw(shape);
+}
+
+// Pedestrian Manager
+class PedestrianManager {
+private:
+    std::vector<std::unique_ptr<Pedestrian>> pedestrians;
+    std::mt19937 rng;
+    float spawnTimer;
+    
+public:
+    PedestrianManager() : rng(std::random_device{}()), spawnTimer(0.f) {}
+    
+    void initialize(MapGenerator& gen) {
+        // Spawn iniziale di molti più pedoni per città viva
+        for (int i = 0; i < 25; i++) {
+            spawnRandomPedestrian(gen);
+        }
+        std::cout << "PedestrianManager initialized with " << pedestrians.size() << " pedestrians\n";
+    }
+    
+    void spawnRandomPedestrian(MapGenerator& gen) {
+        // Genera posizione casuale garantita sui marciapiedi
+        int attempts = 0;
+        sf::Vector2f spawnPos;
+        
+        do {
+            int blockX = rng() % (MAP_SIZE / BLOCK_SIZE);
+            int blockY = rng() % (MAP_SIZE / BLOCK_SIZE);
+            
+            // Scegli specificamente posizioni sui marciapiedi
+            int side = rng() % 4;
+            int localX, localY;
+            
+            switch (side) {
+                case 0: // Lato nord del blocco
+                    localX = 1 + rng() % (BLOCK_SIZE - 2);
+                    localY = 2; // Marciapiede nord
+                    break;
+                case 1: // Lato sud del blocco
+                    localX = 1 + rng() % (BLOCK_SIZE - 2);
+                    localY = 4; // Marciapiede sud
+                    break;
+                case 2: // Lato ovest del blocco
+                    localX = 2; // Marciapiede ovest
+                    localY = 1 + rng() % (BLOCK_SIZE - 2);
+                    break;
+                case 3: // Lato est del blocco
+                    localX = 4; // Marciapiede est
+                    localY = 1 + rng() % (BLOCK_SIZE - 2);
+                    break;
+            }
+            
+            // Evita sovrapposizioni con le strade
+            if (localX == 3) localX = (rng() % 2 == 0) ? 2 : 4;
+            if (localY == 3) localY = (rng() % 2 == 0) ? 2 : 4;
+            
+            spawnPos.x = (blockX * BLOCK_SIZE + localX) * TILE_SIZE + TILE_SIZE / 2.f;
+            spawnPos.y = (blockY * BLOCK_SIZE + localY) * TILE_SIZE + TILE_SIZE / 2.f;
+            
+            // Verifica che sia effettivamente sui marciapiedi
+            int gridX = static_cast<int>(spawnPos.x / TILE_SIZE);
+            int gridY = static_cast<int>(spawnPos.y / TILE_SIZE);
+            if (gen.getCell(gridX, gridY) == SIDEWALK) {
+                break; // Posizione valida trovata
+            }
+            
+            attempts++;
+        } while (attempts < 100);
+        
+        if (attempts < 100 && !isTooCloseToOthers(spawnPos, 25.f)) {
+            auto newPedestrian = std::make_unique<Pedestrian>(spawnPos, &rng);
+            pedestrians.push_back(std::move(newPedestrian));
+        }
+    }
+    
+    bool isTooCloseToOthers(sf::Vector2f position, float minDistance) {
+        for (const auto& ped : pedestrians) {
+            sf::Vector2f pedPos = ped->getPosition();
+            float dist = std::sqrt(std::pow(position.x - pedPos.x, 2) + 
+                                  std::pow(position.y - pedPos.y, 2));
+            if (dist < minDistance) {
+                return true;
+            }
+        }
+        return false;
+    }
+    
+    void update(float deltaTime, sf::Vector2f playerPos, const std::vector<std::unique_ptr<Car>>& cars, MapGenerator& gen) {
+        // Update esistenti
+        for (auto& ped : pedestrians) {
+            ped->update(deltaTime, playerPos, cars, gen);
+        }
+        
+        // Spawning più aggressivo per mantenere la città viva
+        spawnTimer += deltaTime;
+        if (spawnTimer > 1.5f) { // Ogni 1.5 secondi
+            spawnTimer = 0.f;
+            
+            int activePedestrians = 0;
+            for (const auto& ped : pedestrians) {
+                if (ped->isActive) activePedestrians++;
+            }
+            
+            if (activePedestrians < MAX_PEDESTRIANS) {
+                // Spawn multipli per riempire velocemente
+                int spawnCount = std::min(2, MAX_PEDESTRIANS - activePedestrians);
+                for (int i = 0; i < spawnCount; i++) {
+                    spawnRandomPedestrian(gen);
+                }
+            }
+        }
+        
+        // Rimuovi pedoni troppo lontani o rimasti bloccati
+        pedestrians.erase(
+            std::remove_if(pedestrians.begin(), pedestrians.end(),
+                [playerPos](const std::unique_ptr<Pedestrian>& ped) {
+                    float dist = std::sqrt(std::pow(ped->getPosition().x - playerPos.x, 2) + 
+                                          std::pow(ped->getPosition().y - playerPos.y, 2));
+                    return dist > VIEW_DISTANCE * 2.5f; // Aumentato il range
+                }),
+            pedestrians.end()
+        );
+    }
+    
+    void draw(sf::RenderWindow& window) {
+        for (auto& ped : pedestrians) {
+            ped->draw(window);
+        }
+    }
+    
+    size_t getActivePedestrianCount() const {
+        size_t count = 0;
+        for (const auto& ped : pedestrians) {
+            if (ped->isActive) count++;
+        }
+        return count;
+    }
+    
+    size_t getTotalPedestrianCount() const {
+        return pedestrians.size();
+    }
+};
+
 // Enhanced Car Manager
 class CarManager
 {
@@ -1159,6 +2034,11 @@ public:
         {
             car->isActive = !controlled; // Disable AI when player drives
         }
+    }
+    
+    // Metodo per ottenere tutte le auto (per il sistema pedoni)
+    const std::vector<std::unique_ptr<Car>>& getAllCars() const {
+        return cars;
     }
     
     void update(float deltaTime, MapGenerator &gen, sf::Vector2f playerPos)
@@ -1393,6 +2273,7 @@ public:
 // Texture loading function
 void loadTextures()
 {
+    // Vehicle textures
     hasBusTexture = busTexture.loadFromFile("./assets/bus.png");
     if (!hasBusTexture)
         std::cout << "Warning: bus texture not loaded\n";
@@ -1411,6 +2292,8 @@ void loadTextures()
     hasCompactTexture = compactTexture.loadFromFile("./assets/compact.png");
     if (!hasCompactTexture)
         std::cout << "Warning: compact texture not loaded\n";
+    
+    // Environment textures
     hasStreetTexture = streetTexture.loadFromFile("./assets/street.png");
     if (!hasStreetTexture)
         std::cout << "Warning: street texture not loaded\n";
@@ -1426,6 +2309,8 @@ void loadTextures()
     hasParkingTexture = parkingTexture.loadFromFile("./assets/parking.png");
     if (!hasParkingTexture)
         std::cout << "Warning: parking texture not loaded\n";
+    
+    // Player textures
     hasPlayerIdle = PlayerTextureIdle.loadFromFile("./assets/player_idle.png");
     if (!hasPlayerIdle)
         std::cout << "Warning: player idle texture not loaded\n";
@@ -1438,6 +2323,40 @@ void loadTextures()
     hasCarTexture1 = CarTexture1.loadFromFile("./assets/car_1.png");
     if (!hasCarTexture1)
         std::cout << "Warning: car texture not loaded\n";
+    
+    // Pedestrian textures - GTA style pixel art
+    hasPedestrianCitizen = pedestrianCitizenTexture.loadFromFile("./assets/ped_citizen.png");
+    if (!hasPedestrianCitizen)
+        std::cout << "Warning: citizen pedestrian texture not loaded\n";
+    
+    hasPedestrianBusinessman = pedestrianBusinessmanTexture.loadFromFile("./assets/ped_businessman.png");
+    if (!hasPedestrianBusinessman)
+        std::cout << "Warning: businessman pedestrian texture not loaded\n";
+    
+    hasPedestrianElderly = pedestrianElderlyTexture.loadFromFile("./assets/ped_elderly.png");
+    if (!hasPedestrianElderly)
+        std::cout << "Warning: elderly pedestrian texture not loaded\n";
+    
+    hasPedestrianChild = pedestrianChildTexture.loadFromFile("./assets/ped_child.png");
+    if (!hasPedestrianChild)
+        std::cout << "Warning: child pedestrian texture not loaded\n";
+    
+    hasPedestrianJogger = pedestrianJoggerTexture.loadFromFile("./assets/ped_jogger.png");
+    if (!hasPedestrianJogger)
+        std::cout << "Warning: jogger pedestrian texture not loaded\n";
+    
+    hasPedestrianWoman = pedestrianWomanTexture.loadFromFile("./assets/ped_woman.png");
+    if (!hasPedestrianWoman)
+        std::cout << "Warning: woman pedestrian texture not loaded\n";
+    
+    hasPedestrianPolice = pedestrianPoliceTexture.loadFromFile("./assets/ped_police.png");
+    if (!hasPedestrianPolice)
+        std::cout << "Warning: police pedestrian texture not loaded\n";
+    
+    std::cout << "Texture loading complete. Pedestrian types available: " 
+              << (hasPedestrianCitizen + hasPedestrianBusinessman + hasPedestrianElderly + 
+                  hasPedestrianChild + hasPedestrianJogger + hasPedestrianWoman + hasPedestrianPolice) 
+              << "/7\n";
 }
 
 void drawMap(sf::RenderWindow &window, MapGenerator &gen)
@@ -1502,7 +2421,7 @@ void drawMap(sf::RenderWindow &window, MapGenerator &gen)
     }
 }
 
-// Player class with car hijacking
+// Player class with improved car hijacking
 struct Player
 {
     sf::CircleShape shape;
@@ -1515,7 +2434,7 @@ struct Player
     float carHijackRange = 40.f;
 
     Player(float startX, float startY)
-        : x(startX), y(startY), speed(150.0f), isMoving(false), rotation(0.0f)
+        : x(startX), y(startY), speed(120.0f), isMoving(false), rotation(0.0f) // Ridotto da 150.0f
     {
         shape.setRadius(15.f);
         shape.setFillColor(sf::Color::Red);
@@ -1529,142 +2448,149 @@ struct Player
         updatePosition();
     }
 
-   void update(float deltaTime, MapGenerator &gen, CarManager *carManager)
-{
-    if (isDriving && currentCar)
+    void update(float deltaTime, MapGenerator &gen, CarManager *carManager)
     {
-        if (currentCar->isDestroyed) {
-            // Car destroyed, exit automatically
-            carManager->setCarPlayerControlled(currentCar, false);
-            if (hasPlayerIdle) shape.setTexture(&PlayerTextureIdle);
-            std::cout << "Car exploded! You were ejected!" << std::endl;
-            isDriving = false;
-            currentCar = nullptr;
-            return;
-        }
-        
-        // Stolen car driving mode
-        float carSpeed = 500.0f * currentCar->getHealthPercentage(); // Reduced speed if damaged
-        float dx = 0.f, dy = 0.f;
-
-        if (sf::Keyboard::isKeyPressed(sf::Keyboard::Key::W))
-            dy = -carSpeed * deltaTime;
-        if (sf::Keyboard::isKeyPressed(sf::Keyboard::Key::S))
-            dy = carSpeed * deltaTime;
-        if (sf::Keyboard::isKeyPressed(sf::Keyboard::Key::A))
-            dx = -carSpeed * deltaTime;
-        if (sf::Keyboard::isKeyPressed(sf::Keyboard::Key::D))
-            dx = carSpeed * deltaTime;
-
-        // Save previous position for speed calculation
-        sf::Vector2f previousPos(currentCar->x, currentCar->y);
-        
-        // Calculate new position
-        float newX = currentCar->x + dx;
-        float newY = currentCar->y + dy;
-        
-        // SISTEMA DI COLLISIONI MIGLIORATO
-        bool canMoveX = true;
-        bool canMoveY = true;
-        float currentSpeed = std::sqrt(dx*dx + dy*dy) / deltaTime;
-        
-        // Controlla multiple celle intorno alla macchina per collisioni più accurate
-        sf::Vector2f carSize = currentCar->properties.size;
-        float halfWidth = carSize.x / 2.0f;
-        float halfHeight = carSize.y / 2.0f;
-        
-        // Punti di controllo intorno alla macchina
-        std::vector<sf::Vector2f> checkPoints = {
-            {newX - halfWidth, newY - halfHeight}, // Top-left
-            {newX + halfWidth, newY - halfHeight}, // Top-right
-            {newX - halfWidth, newY + halfHeight}, // Bottom-left
-            {newX + halfWidth, newY + halfHeight}, // Bottom-right
-            {newX, newY - halfHeight},             // Top-center
-            {newX, newY + halfHeight},             // Bottom-center
-            {newX - halfWidth, newY},              // Left-center
-            {newX + halfWidth, newY}               // Right-center
-        };
-        
-        // Controllo collisioni sull'asse X
-        if (dx != 0.f) {
-            std::vector<sf::Vector2f> xCheckPoints = {
-                {newX + (dx > 0 ? halfWidth : -halfWidth), currentCar->y - halfHeight},
-                {newX + (dx > 0 ? halfWidth : -halfWidth), currentCar->y},
-                {newX + (dx > 0 ? halfWidth : -halfWidth), currentCar->y + halfHeight}
-            };
-            
-            for (const auto& point : xCheckPoints) {
-                int gridX = static_cast<int>(point.x / TILE_SIZE);
-                int gridY = static_cast<int>(point.y / TILE_SIZE);
-                
-                if (gen.getCell(gridX, gridY) == BUILDING) {
-                    canMoveX = false;
-                    break;
-                }
+        if (isDriving && currentCar)
+        {
+            if (currentCar->isDestroyed) {
+                // Car destroyed, exit automatically
+                carManager->setCarPlayerControlled(currentCar, false);
+                if (hasPlayerIdle) shape.setTexture(&PlayerTextureIdle);
+                std::cout << "Car exploded! You were ejected!" << std::endl;
+                isDriving = false;
+                currentCar = nullptr;
+                return;
             }
-        }
-        
-        // Controllo collisioni sull'asse Y
-        if (dy != 0.f) {
-            std::vector<sf::Vector2f> yCheckPoints = {
-                {currentCar->x - halfWidth, newY + (dy > 0 ? halfHeight : -halfHeight)},
-                {currentCar->x, newY + (dy > 0 ? halfHeight : -halfHeight)},
-                {currentCar->x + halfWidth, newY + (dy > 0 ? halfHeight : -halfHeight)}
-            };
             
-            for (const auto& point : yCheckPoints) {
-                int gridX = static_cast<int>(point.x / TILE_SIZE);
-                int gridY = static_cast<int>(point.y / TILE_SIZE);
-                
-                if (gen.getCell(gridX, gridY) == BUILDING) {
-                    canMoveY = false;
-                    break;
-                }
+            // Velocità auto ridotta e scalata con danno
+            float baseCarSpeed = 250.0f; // Ridotto da 500.0f
+            float carSpeed = baseCarSpeed * currentCar->getHealthPercentage();
+            float dx = 0.f, dy = 0.f;
+
+            if (sf::Keyboard::isKeyPressed(sf::Keyboard::Key::W))
+                dy = -carSpeed * deltaTime;
+            if (sf::Keyboard::isKeyPressed(sf::Keyboard::Key::S))
+                dy = carSpeed * deltaTime;
+            if (sf::Keyboard::isKeyPressed(sf::Keyboard::Key::A))
+                dx = -carSpeed * deltaTime;
+            if (sf::Keyboard::isKeyPressed(sf::Keyboard::Key::D))
+                dx = carSpeed * deltaTime;
+
+            // Calcola velocità attuale per sistema danni
+            float currentSpeed = std::sqrt(dx*dx + dy*dy) / deltaTime;
+            
+            // NUOVO SISTEMA DI COLLISIONI SEMPLIFICATO
+            bool canMoveX = true;
+            bool canMoveY = true;
+            
+            // Test movimento X usando la nuova funzione
+            if (dx != 0.f) {
+                float testX = currentCar->x + dx;
+                canMoveX = !currentCar->checkBuildingCollision(testX, currentCar->y, gen);
             }
-        }
-        
-        // Applica movimento solo se possibile
-        float actualDx = canMoveX ? dx : 0.f;
-        float actualDy = canMoveY ? dy : 0.f;
-        
-        // Se c'è stata una collisione e la velocità è significativa, applica danni
-        if ((!canMoveX && dx != 0.f) || (!canMoveY && dy != 0.f)) {
-            // Calcola la severità della collisione
-            float impactSpeed = currentSpeed;
             
-            // Solo danni se la velocità è sopra una soglia minima
-            if (impactSpeed > 100.0f) { // Soglia minima per danni
-                float damage = (impactSpeed - 100.0f) * 0.3f; // Danni graduali
-                
-                // Limita i danni massimi per impatto
-                damage = std::min(damage, 150.0f);
-                
-                currentCar->takeDamage(damage);
-                
-                std::cout << "CRASH! Speed: " << (int)impactSpeed 
-                          << " | Damage: " << (int)damage 
-                          << " | Health: " << (int)currentCar->health << "/" << (int)currentCar->maxHealth << std::endl;
-                
-                // Effetto di rimbalzo leggero
+            // Test movimento Y usando la nuova funzione  
+            if (dy != 0.f) {
+                float testY = currentCar->y + dy;
+                canMoveY = !currentCar->checkBuildingCollision(currentCar->x, testY, gen);
+            }
+            
+            // Applica movimento con sistema danni migliorato
+            bool hasCollision = (!canMoveX && dx != 0.f) || (!canMoveY && dy != 0.f);
+            
+            float actualDx = canMoveX ? dx : 0.f;
+            float actualDy = canMoveY ? dy : 0.f;
+            
+            // Sistema danni con cooldown
+            currentCar->updateCollisionDamage(deltaTime, currentSpeed, hasCollision, sf::Vector2f(dx, dy));
+            
+            // Effetto rimbalzo leggero solo per collisioni ad alta velocità
+            if (hasCollision && currentSpeed > 150.0f) {
                 if (!canMoveX && dx != 0.f) {
-                    actualDx = -dx * 0.1f; // Piccolo rimbalzo
+                    actualDx = -dx * 0.05f; // Rimbalzo molto ridotto
                 }
                 if (!canMoveY && dy != 0.f) {
-                    actualDy = -dy * 0.1f; // Piccolo rimbalzo
+                    actualDy = -dy * 0.05f;
+                }
+            }
+            
+            // Aggiorna posizione
+            currentCar->x += actualDx;
+            currentCar->y += actualDy;
+            currentCar->carShape.setPosition(sf::Vector2f(currentCar->x, currentCar->y));
+            
+            // Update car rotation
+            updateCarRotation(actualDx, actualDy, deltaTime);
+            
+            // Player segue l'auto
+            x = currentCar->x;
+            y = currentCar->y;
+        }
+        else
+        {
+            // Normal player mode (unchanged)
+            float dx = 0.f, dy = 0.f;
+            bool wasMoving = isMoving;
+            isMoving = false;
+
+            if (sf::Keyboard::isKeyPressed(sf::Keyboard::Key::W))
+            {
+                dy = -speed * deltaTime;
+                rotation = 90.f;
+                isMoving = true;
+            }
+            if (sf::Keyboard::isKeyPressed(sf::Keyboard::Key::S))
+            {
+                dy = speed * deltaTime;
+                rotation = 270.f;
+                isMoving = true;
+            }
+            if (sf::Keyboard::isKeyPressed(sf::Keyboard::Key::A))
+            {
+                dx = -speed * deltaTime;
+                rotation = 0.f;
+                isMoving = true;
+            }
+            if (sf::Keyboard::isKeyPressed(sf::Keyboard::Key::D))
+            {
+                dx = speed * deltaTime;
+                rotation = 180.f;
+                isMoving = true;
+            }
+
+            // Check collisions before moving (avoid buildings)
+            float newX = x + dx;
+            float newY = y + dy;
+
+            int gridX = static_cast<int>(newX / TILE_SIZE);
+            int gridY = static_cast<int>(newY / TILE_SIZE);
+
+            if (gen.getCell(gridX, gridY) != BUILDING)
+            {
+                x = newX;
+                y = newY;
+            }
+
+            // Update texture based on movement
+            if (isMoving != wasMoving)
+            {
+                if (isMoving && hasPlayerWalk)
+                {
+                    shape.setTexture(&PlayerTextureWalk);
+                }
+                else if (!isMoving && hasPlayerIdle)
+                {
+                    shape.setTexture(&PlayerTextureIdle);
                 }
             }
         }
+
+        updatePosition();
+    }
+
+    void updateCarRotation(float dx, float dy, float deltaTime) {
+        if (!currentCar) return;
         
-        // Aggiorna posizione della macchina
-        currentCar->x += actualDx;
-        currentCar->y += actualDy;
-        currentCar->carShape.setPosition(sf::Vector2f(currentCar->x, currentCar->y));
-        
-        // Aggiorna velocità per il sistema di danno
-        currentCar->lastSpeed = std::sqrt(actualDx*actualDx + actualDy*actualDy) / deltaTime;
-        currentCar->lastPosition = previousPos;
-        
-        // Update car rotation (with shake if heavily damaged)
         float healthPct = currentCar->getHealthPercentage();
         float rotationOffset = 0.f;
         
@@ -1676,80 +2602,23 @@ struct Player
         }
         
         // Rotazione solo se c'è movimento effettivo
-        if (actualDx > 0.1f)
-            currentCar->carShape.setRotation(sf::degrees(0 + rotationOffset));
-        else if (actualDx < -0.1f)
-            currentCar->carShape.setRotation(sf::degrees(180 + rotationOffset));
-        else if (actualDy < -0.1f)
-            currentCar->carShape.setRotation(sf::degrees(270 + rotationOffset));
-        else if (actualDy > 0.1f)
-            currentCar->carShape.setRotation(sf::degrees(90 + rotationOffset));
-
-        // Player position follows car
-        x = currentCar->x;
-        y = currentCar->y;
-    }
-    else
-    {
-        // Normal player mode (unchanged)
-        float dx = 0.f, dy = 0.f;
-        bool wasMoving = isMoving;
-        isMoving = false;
-
-        if (sf::Keyboard::isKeyPressed(sf::Keyboard::Key::W))
-        {
-            dy = -speed * deltaTime;
-            rotation = 90.f;
-            isMoving = true;
-        }
-        if (sf::Keyboard::isKeyPressed(sf::Keyboard::Key::S))
-        {
-            dy = speed * deltaTime;
-            rotation = 270.f;
-            isMoving = true;
-        }
-        if (sf::Keyboard::isKeyPressed(sf::Keyboard::Key::A))
-        {
-            dx = -speed * deltaTime;
-            rotation = 0.f;
-            isMoving = true;
-        }
-        if (sf::Keyboard::isKeyPressed(sf::Keyboard::Key::D))
-        {
-            dx = speed * deltaTime;
-            rotation = 180.f;
-            isMoving = true;
-        }
-
-        // Check collisions before moving (avoid buildings)
-        float newX = x + dx;
-        float newY = y + dy;
-
-        int gridX = static_cast<int>(newX / TILE_SIZE);
-        int gridY = static_cast<int>(newY / TILE_SIZE);
-
-        if (gen.getCell(gridX, gridY) != BUILDING)
-        {
-            x = newX;
-            y = newY;
-        }
-
-        // Update texture based on movement
-        if (isMoving != wasMoving)
-        {
-            if (isMoving && hasPlayerWalk)
-            {
-                shape.setTexture(&PlayerTextureWalk);
-            }
-            else if (!isMoving && hasPlayerIdle)
-            {
-                shape.setTexture(&PlayerTextureIdle);
+        if (std::abs(dx) > 0.1f || std::abs(dy) > 0.1f) {
+            if (std::abs(dx) > std::abs(dy)) {
+                // Movimento orizzontale prevalente
+                if (dx > 0.1f)
+                    currentCar->carShape.setRotation(sf::degrees(0 + rotationOffset));
+                else if (dx < -0.1f)
+                    currentCar->carShape.setRotation(sf::degrees(180 + rotationOffset));
+            } else {
+                // Movimento verticale prevalente
+                if (dy < -0.1f)
+                    currentCar->carShape.setRotation(sf::degrees(270 + rotationOffset));
+                else if (dy > 0.1f)
+                    currentCar->carShape.setRotation(sf::degrees(90 + rotationOffset));
             }
         }
     }
-
-    updatePosition();
-}
+    
     void updatePosition()
     {
         shape.setPosition(sf::Vector2f(x, y));
@@ -1773,16 +2642,23 @@ struct Player
 // Main function
 int main()
 {
-    sf::RenderWindow window(sf::VideoMode({1200, 800}), "GTA-Style Traffic System (SFML 3.0)");
+    sf::RenderWindow window(sf::VideoMode({1200, 800}), "GTA-Style Enhanced Game (SFML 3.0)");
     window.setFramerateLimit(60);
 
     loadTextures();
+    
+    // Inizializza il database delle dimensioni veicoli
+    VehicleDatabase::initializeDimensions();
 
     MapGenerator gen;
     gen.generateGridCity();
 
     CarManager carManager;
     carManager.initialize(gen);
+    
+    // Inizializza il sistema pedoni
+    PedestrianManager pedestrianManager;
+    pedestrianManager.initialize(gen);
 
     Player player(MAP_SIZE * TILE_SIZE / 2.f, MAP_SIZE * TILE_SIZE / 2.f);
 
@@ -1859,6 +2735,9 @@ int main()
         // Update game state
         player.update(deltaTime, gen, &carManager);
         carManager.update(deltaTime, gen, player.getPosition());
+        
+        // Update pedestrians
+        pedestrianManager.update(deltaTime, player.getPosition(), carManager.getAllCars(), gen);
 
         // Camera follows player
         camera.setCenter(player.getPosition());
@@ -1875,6 +2754,7 @@ int main()
         }
 
         carManager.draw(window);
+        pedestrianManager.draw(window); // Draw pedestrians
         player.draw(window);
 
         // UI Info (use default view)
@@ -1899,8 +2779,8 @@ int main()
             carCountText.setCharacterSize(20);
             carCountText.setFillColor(sf::Color::White);
             carCountText.setPosition(sf::Vector2f(10, 10));
-            carCountText.setString("Active Cars: " + std::to_string(carManager.getActiveCarCount()) + 
-                                  " / Total: " + std::to_string(carManager.getTotalCarCount()));
+            carCountText.setString("Cars: " + std::to_string(carManager.getActiveCarCount()) + 
+                                  " | Pedestrians: " + std::to_string(pedestrianManager.getActivePedestrianCount()));
             window.draw(carCountText);
 
             // Draw player status
@@ -1934,6 +2814,16 @@ int main()
             helpText.setPosition(sf::Vector2f(10, 70));
             helpText.setString("Controls: WASD=Move/Drive | F=Steal/Exit Car | Tab=Debug View");
             window.draw(helpText);
+
+            // Draw performance info
+            sf::Text perfText(font);
+            perfText.setCharacterSize(14);
+            perfText.setFillColor(sf::Color::Green);
+            perfText.setPosition(sf::Vector2f(10, 100));
+            perfText.setString("FPS: " + std::to_string((int)(1.0f / deltaTime)) + 
+                             " | Total Cars: " + std::to_string(carManager.getTotalCarCount()) +
+                             " | Total Pedestrians: " + std::to_string(pedestrianManager.getTotalPedestrianCount()));
+            window.draw(perfText);
 
             // Draw damage warning if in damaged car
             if (player.isDriving && player.currentCar && player.currentCar->getHealthPercentage() < 0.3f)
